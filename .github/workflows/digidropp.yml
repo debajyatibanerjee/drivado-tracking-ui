@@ -1,0 +1,54 @@
+# Builds the app on every push to main (and on pull requests into it) and uploads it to Digidropp.
+# Managed by Digidropp: https://digidropp.online
+name: Digidropp build
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+concurrency:
+  group: digidropp-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  build:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Generate the Android project
+        run: npx expo prebuild --platform android --no-install
+      - name: Use the project's stable signing key
+        run: |
+          mkdir -p ~/.android
+          echo "$DIGIDROPP_DEBUG_KEYSTORE" | base64 -d > ~/.android/debug.keystore
+          cp ~/.android/debug.keystore android/app/debug.keystore
+        env:
+          DIGIDROPP_DEBUG_KEYSTORE: ${{ secrets.DIGIDROPP_DEBUG_KEYSTORE }}
+      - name: Build APK
+        run: cd android && chmod +x gradlew && ./gradlew assembleRelease
+      - name: Upload to Digidropp
+        uses: digidropp/upload-action@v1
+        with:
+          api-token: ${{ secrets.DIGIDROPP_TOKEN }}
+          api-url: "https://api.digidropp.online/api"
+          file: "android/app/build/outputs/apk/release/app-release.apk"

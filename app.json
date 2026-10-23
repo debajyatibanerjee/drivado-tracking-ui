@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "driver-app",
+    "name": "Driver Tracker",
     "slug": "driver-app",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -16,10 +16,20 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.drivado.drivertracker",
+      "versionCode": 1
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Driver Tracker uses your location to share your live position during a trip."
+        }
+      ]
+    ]
   }
 }

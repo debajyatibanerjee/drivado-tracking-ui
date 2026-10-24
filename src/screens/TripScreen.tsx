@@ -1,30 +1,23 @@
-import { useEffect, useState, useSyncExternalStore } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useSyncExternalStore } from 'react';
+import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { WEB_HEADERS_WARNING } from '../components/confirm';
 import MapPanel from '../components/MapPanel';
 import { Card, Chips, GpsBanner, Stat, STATUS_COLORS, ToggleRow, ui } from '../components/ui';
 import { ARRIVAL_RADIUS_M, SPEEDS, SpeedKey } from '../config';
-import { Session } from '../services/session';
 import { LogKind, SignalMode, Snapshot, TrackingEngine } from '../services/trackingEngine';
 import { LocationSource, STATUS_FLOW, TripStatus, tripTypeFor } from '../types';
 import PlanTripView from './PlanTripView';
 
 interface Props {
-  session: Session;
+  engine: TrackingEngine; // owned by App, keeps running when this screen closes
+  onBack: () => void;
   onLogout: () => void;
 }
 
-// App remounts this screen per session, so one engine per mount is enough.
-export default function TripScreen({ session, onLogout }: Props) {
-  const [engine] = useState(() => new TrackingEngine(session));
-
-  useEffect(() => {
-    engine.start();
-    return () => engine.stop();
-  }, [engine]);
-
-  return <TripView engine={engine} onLogout={onLogout} />;
+export default function TripScreen({ engine, onBack, onLogout }: Props) {
+  return <TripView engine={engine} onBack={onBack} onLogout={onLogout} />;
 }
 
 const SIGNAL_OPTIONS: SignalMode[] = ['auto', 0, 1, 2, 3, 4];
@@ -32,12 +25,17 @@ const SPEED_OPTIONS = Object.keys(SPEEDS) as SpeedKey[];
 const SOURCE_OPTIONS: LocationSource[] = ['gps', 'sim'];
 const BATTERY_PRESETS = [100, 50, 15, 5] as const;
 
-function TripView({ engine, onLogout }: { engine: TrackingEngine; onLogout: () => void }) {
+function TripView({ engine, onBack, onLogout }: Props) {
   const s = useSyncExternalStore(engine.subscribe, engine.getSnapshot);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
-      <Header s={s} onChangeServer={onLogout} />
+      <Header s={s} onBack={onBack} onLogout={onLogout} />
+      {Platform.OS === 'web' && (
+        <View style={styles.webBanner}>
+          <Text style={styles.webBannerText}>{WEB_HEADERS_WARNING}</Text>
+        </View>
+      )}
       {s.trip ? (
         <ActiveTrip engine={engine} s={s} onLogout={onLogout} />
       ) : (
@@ -51,12 +49,6 @@ function ActiveTrip({ engine, s, onLogout }: { engine: TrackingEngine; s: Snapsh
   const trip = s.trip!;
   const status = trip.status;
   const useGps = s.sim.locationSource === 'gps';
-
-  const confirmLogout = () =>
-    Alert.alert('Logout', 'Stop tracking and logout? Cached updates stay on the device.', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Logout', style: 'destructive', onPress: onLogout },
-    ]);
 
   return (
     <>
@@ -200,7 +192,7 @@ function ActiveTrip({ engine, s, onLogout }: { engine: TrackingEngine; s: Snapsh
           <Pressable style={styles.secondaryBtn} onPress={() => engine.clearCache()}>
             <Text style={styles.secondaryText}>Clear offline cache</Text>
           </Pressable>
-          <Pressable style={styles.secondaryBtn} onPress={confirmLogout}>
+          <Pressable style={styles.secondaryBtn} onPress={onLogout}>
             <Text style={[styles.secondaryText, { color: '#dc2626' }]}>Logout</Text>
           </Pressable>
         </View>
@@ -209,7 +201,7 @@ function ActiveTrip({ engine, s, onLogout }: { engine: TrackingEngine; s: Snapsh
   );
 }
 
-function Header({ s, onChangeServer }: { s: Snapshot; onChangeServer: () => void }) {
+function Header({ s, onBack, onLogout }: { s: Snapshot; onBack: () => void; onLogout: () => void }) {
   const pill =
     s.connState === 'connected'
       ? { text: 'CONNECTED', bg: '#dcfce7', fg: '#166534' }
@@ -218,12 +210,15 @@ function Header({ s, onChangeServer }: { s: Snapshot; onChangeServer: () => void
         : { text: 'OFFLINE', bg: '#fee2e2', fg: '#991b1b' };
   return (
     <View style={styles.header}>
+      <Pressable onPress={onBack} hitSlop={10} style={styles.back}>
+        <Text style={styles.backText}>‹</Text>
+      </Pressable>
       <View style={{ flex: 1 }}>
         <Text style={styles.email} numberOfLines={1}>
-          {s.email}
+          {s.driverId} · {s.email}
         </Text>
         <Text style={styles.url} numberOfLines={1}>
-          {s.wsUrl}
+          Trip {s.loginTripId} · {s.wsUrl}
         </Text>
         {s.connState !== 'connected' && !!s.connError && (
           <Text style={styles.connError} numberOfLines={2}>
@@ -235,8 +230,8 @@ function Header({ s, onChangeServer }: { s: Snapshot; onChangeServer: () => void
         <View style={[styles.pill, { backgroundColor: pill.bg }]}>
           <Text style={[styles.pillText, { color: pill.fg }]}>{pill.text}</Text>
         </View>
-        <Pressable onPress={onChangeServer} hitSlop={8}>
-          <Text style={styles.changeServer}>Change login</Text>
+        <Pressable onPress={onLogout} hitSlop={8}>
+          <Text style={styles.changeServer}>Logout</Text>
         </Pressable>
       </View>
     </View>
@@ -358,6 +353,8 @@ const LOG_COLORS: Record<LogKind, string> = {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#f1f5f9' },
+  webBanner: { backgroundColor: '#fef3c7', paddingHorizontal: 14, paddingVertical: 8 },
+  webBannerText: { color: '#92400e', fontSize: 12 },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -367,6 +364,8 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#e2e8f0',
   },
+  back: { paddingRight: 10, paddingVertical: 2 },
+  backText: { fontSize: 30, lineHeight: 32, color: '#2563eb', fontWeight: '600' },
   email: { fontSize: 15, fontWeight: '700', color: '#0f172a' },
   url: { fontSize: 11, color: '#64748b', marginTop: 2 },
   connError: { fontSize: 11, color: '#dc2626', marginTop: 2 },

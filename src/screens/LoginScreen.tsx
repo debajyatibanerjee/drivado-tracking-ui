@@ -12,15 +12,22 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { DEFAULT_WS_URL, ENV_WS_URL } from '../config';
-import { loadLastLogin, saveLastLogin, Session } from '../services/session';
+import { loadLastLogin, LoginForm, saveLastLogin } from '../services/session';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const WS_RE = /^wss?:\/\/.+/i;
 
-type Form = Session;
+type Form = LoginForm;
 const EMPTY: Form = { email: '', driverId: '', wsUrl: DEFAULT_WS_URL, wsKey: '', tripId: '', deviceId: '' };
 
-export default function LoginScreen({ onLogin }: { onLogin: (s: Session) => void }) {
+interface Props {
+  onLogin: (form: LoginForm) => void;
+  onCancel?: () => void; // shown when other drivers are already logged in
+  onBulk: () => void; // switch to "Add multiple drivers"
+  takenTripIds: string[]; // X-Trip-IDs already used by logged-in drivers
+}
+
+export default function LoginScreen({ onLogin, onCancel, onBulk, takenTripIds }: Props) {
   const [form, setForm] = useState<Form>(EMPTY);
   const [error, setError] = useState('');
 
@@ -34,7 +41,7 @@ export default function LoginScreen({ onLogin }: { onLogin: (s: Session) => void
   const set = (k: keyof Form) => (v: string) => setForm((f) => ({ ...f, [k]: v }));
 
   const submit = async () => {
-    const s: Session = {
+    const s: LoginForm = {
       email: form.email.trim().toLowerCase(),
       driverId: form.driverId.trim(),
       wsUrl: form.wsUrl.trim(),
@@ -47,6 +54,9 @@ export default function LoginScreen({ onLogin }: { onLogin: (s: Session) => void
     if (!WS_RE.test(s.wsUrl)) return setError('WebSocket URL must start with ws:// or wss://');
     if (!s.wsKey) return setError('Enter X-WS-Key');
     if (!s.tripId) return setError('Enter X-Trip-ID');
+    if (takenTripIds.includes(s.tripId)) {
+      return setError(`${s.tripId} is already used by a logged-in driver. Use another X-Trip-ID (one connection per trip).`);
+    }
     if (!s.deviceId) return setError('Enter X-Device-ID');
     setError('');
     await saveLastLogin(s);
@@ -72,8 +82,12 @@ export default function LoginScreen({ onLogin }: { onLogin: (s: Session) => void
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
           <Text style={styles.logo}>🚖</Text>
-          <Text style={styles.title}>Driver Tracker</Text>
-          <Text style={styles.subtitle}>Shares your live location during a trip.</Text>
+          <Text style={styles.title}>{onCancel ? 'Add driver' : 'Driver Tracker'}</Text>
+          <Text style={styles.subtitle}>
+            {onCancel
+              ? `${takenTripIds.length} driver(s) already logged in. This one runs alongside them.`
+              : 'Shares your live location during a trip.'}
+          </Text>
 
           {field('Driver email', 'email', { placeholder: 'driver@example.com', keyboardType: 'email-address' })}
           {field('Driver ID', 'driverId', { placeholder: 'DR123', autoCapitalize: 'characters' })}
@@ -87,8 +101,16 @@ export default function LoginScreen({ onLogin }: { onLogin: (s: Session) => void
           {!!error && <Text style={styles.error}>{error}</Text>}
 
           <Pressable style={({ pressed }) => [styles.button, pressed && { opacity: 0.8 }]} onPress={submit}>
-            <Text style={styles.buttonText}>Login</Text>
+            <Text style={styles.buttonText}>{onCancel ? 'Login this driver' : 'Login'}</Text>
           </Pressable>
+          <Pressable style={styles.cancel} onPress={onBulk}>
+            <Text style={styles.bulkText}>Add multiple drivers with generated IDs ›</Text>
+          </Pressable>
+          {onCancel && (
+            <Pressable style={styles.cancel} onPress={onCancel}>
+              <Text style={styles.cancelText}>Cancel</Text>
+            </Pressable>
+          )}
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -131,4 +153,7 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   buttonText: { color: '#fff', fontSize: 17, fontWeight: '700' },
+  cancel: { alignItems: 'center', paddingVertical: 14 },
+  cancelText: { color: '#64748b', fontSize: 15, fontWeight: '600' },
+  bulkText: { color: '#2563eb', fontSize: 15, fontWeight: '700' },
 });

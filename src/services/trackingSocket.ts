@@ -1,3 +1,5 @@
+import { Platform } from 'react-native';
+
 export type ConnState = 'disconnected' | 'connecting' | 'connected';
 
 const CONNECT_TIMEOUT_MS = 10000;
@@ -65,7 +67,10 @@ export class TrackingSocket {
         protocols: string[] | null,
         options: { headers: Record<string, string> },
       ) => WebSocket;
-      ws = new RNWebSocket(this.url, null, { headers: { 'bypass-tunnel-reminder': 'true', ...this.headers } });
+      ws =
+        Platform.OS === 'web'
+          ? new WebSocket(this.url) // browsers can't send custom headers at all
+          : new RNWebSocket(this.url, null, { headers: { 'bypass-tunnel-reminder': 'true', ...this.headers } });
     } catch {
       this.onLog?.(`Invalid WebSocket URL: ${this.url}`);
       this.setState('disconnected');
@@ -94,7 +99,10 @@ export class TrackingSocket {
     ws.onerror = (e) => {
       // onclose always follows; reconnect is handled there.
       const msg = (e as unknown as { message?: string }).message;
-      if (this.ws === ws) this.onLog?.(`Socket error${msg ? `: ${msg}` : ''}${explain(msg)}`);
+      if (this.ws === ws) {
+        const hint = Platform.OS === 'web' ? ' (web browsers cannot send the X-* headers; use the phone app)' : explain(msg);
+        this.onLog?.(`Socket error${msg ? `: ${msg}` : ''}${hint}`);
+      }
     };
     ws.onclose = (e) => {
       if (this.ws !== ws) return;

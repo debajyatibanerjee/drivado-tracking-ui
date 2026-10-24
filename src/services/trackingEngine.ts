@@ -31,13 +31,15 @@ import {
   TripStatus,
   tripTypeFor,
 } from '../types';
-import { GpsStatus, GpsTracker } from './gps';
+import { GpsStatus, sharedGps } from './gps';
 import { OfflineQueue } from './offlineQueue';
 import { Session } from './session';
 import { fetchRoute, Route } from './routing';
 import { ConnState, TrackingSocket } from './trackingSocket';
 
-const META_KEY = '@driver_trip_meta_v3';
+// Per-driver storage keys. The 'legacy' session keeps the single-login keys.
+const metaKey = (id: string) => (id === 'legacy' ? '@driver_trip_meta_v3' : `@driver_trip_meta_v3:${id}`);
+const queueKey = (id: string) => (id === 'legacy' ? '@driver_offline_queue_v2' : `@driver_offline_queue_v2:${id}`);
 
 export type SignalMode = 'auto' | 0 | 1 | 2 | 3 | 4;
 
@@ -121,6 +123,7 @@ export interface Snapshot {
 
 interface PersistedMeta {
   email: string;
+  sim?: SimSettings;
   trip: Trip | null;
   legs: Legs | null;
   distance: number;
@@ -162,8 +165,10 @@ const legsFrom = (toPickup: Route, toDropoff: Route): Legs => ({
 // telemetry, the socket and the offline cache. React reads it via subscribe/getSnapshot.
 export class TrackingEngine {
   private socket = new TrackingSocket();
-  private queue = new OfflineQueue();
-  private gps = new GpsTracker();
+  private queue: OfflineQueue;
+  private readonly sessionId: string;
+  private gps = sharedGps;
+  private gpsUnsub: (() => void) | null = null;
   private listeners = new Set<() => void>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private netUnsub: NetInfoSubscription | null = null;
@@ -190,6 +195,8 @@ export class TrackingEngine {
   private snap: Snapshot;
 
   constructor(session: Session) {
+    this.sessionId = session.id;
+    this.queue = new OfflineQueue(queueKey(session.id));
     this.snap = {
       email: session.email,
       driverId: session.driverId,
@@ -238,7 +245,6 @@ export class TrackingEngine {
       this.log('warn', msg);
       if (msg.startsWith('Socket error') || msg.startsWith('Connect timed out')) this.set({ connError: msg });
     };
-    this.gps.onChange = this.handleGps;
   }
 
   // ---- React bindings -------------------------------------------------------
@@ -265,7 +271,7 @@ export class TrackingEngine {
       text,
     };
     this.set({ logs: [entry, ...this.snap.logs].slice(0, MAX_LOG_ENTRIES) });
-    console.log(`[tracker] ${kind.toUpperCase()} ${text}`); // also visible in the dev server terminal
+    console.log(`[${this.snap.driverId}/${this.snap.loginTripId}] ${kind.toUpperCase()} ${text}`); // also visible in the dev server terminal
   }
 
   // Sends one wire message and remembers it so the screen can show exactly what went out.
@@ -273,7 +279,7 @@ export class TrackingEngine {
     const msg = buildMessage(points);
     if (!this.socket.send(msg)) return false;
     const json = JSON.stringify(msg);
-    console.log(`[tracker] SENT ${json}`);
+    console.log(`[${this.snap.driverId}/${this.snap.loginTripId}] SENT ${json}`);
     this.set({ lastSent: JSON.stringify(msg, null, 1), lastSentAt: new Date().toLocaleTimeString() });
     return true;
   }
@@ -302,7 +308,9 @@ export class TrackingEngine {
       this.applyConnectivity();
     });
 
-    this.gps.start();
+    this.gpsUnsub = this.gps.subscribe(this.handleGps);
+    this.gps.acquire();
+    this.handleGps(); // pick up a fix the shared GPS may already have
     this.initRealBattery();
     this.updateTelemetry();
     this.updatePosition();
@@ -318,9 +326,20 @@ export class TrackingEngine {
     this.netUnsub = null;
     this.batterySubs.forEach((s) => s.remove());
     this.batterySubs = [];
-    this.gps.stop();
+    if (this.gpsUnsub) {
+      this.gpsUnsub();
+      this.gpsUnsub = null;
+      this.gps.release();
+    }
     this.socket.disconnect();
     this.persist();
+  }
+
+  // Logout: stop and delete this driver's saved trip and offline cache.
+  async destroy() {
+    this.stop();
+    await this.queue.remove();
+    await AsyncStorage.removeItem(metaKey(this.sessionId)).catch(() => {});
   }
 
   retryGps = () => {
@@ -329,10 +348,11 @@ export class TrackingEngine {
 
   private async restore() {
     try {
-      const raw = await AsyncStorage.getItem(META_KEY);
+      const raw = await AsyncStorage.getItem(metaKey(this.sessionId));
       if (!raw) return;
       const meta: PersistedMeta = JSON.parse(raw);
       this.seq = meta.seq ?? 0;
+      if (meta.sim) this.set({ sim: { ...this.snap.sim, ...meta.sim } });
       this.simBattery = meta.simBattery ?? 100;
       if (meta.email === this.snap.email && meta.trip && meta.legs && meta.trip.status !== 'COMPLETED') {
         this.distance = meta.distance;
@@ -346,13 +366,14 @@ export class TrackingEngine {
   private persist() {
     const meta: PersistedMeta = {
       email: this.snap.email,
+      sim: this.snap.sim,
       trip: this.snap.trip,
       legs: this.snap.legs,
       distance: this.distance,
       seq: this.seq,
       simBattery: this.simBattery,
     };
-    AsyncStorage.setItem(META_KEY, JSON.stringify(meta)).catch(() => {});
+    AsyncStorage.setItem(metaKey(this.sessionId), JSON.stringify(meta)).catch(() => {});
   }
 
   private async initRealBattery() {
@@ -403,14 +424,15 @@ export class TrackingEngine {
   // ---- Driver actions -------------------------------------------------------
 
   // Builds road routes (driver -> pickup -> drop-off) and starts the trip at ENROUTE.
-  startTrip = async (plan: TripPlan): Promise<string | null> => {
+  // startAt: where a simulated driver begins (ignored with real GPS).
+  startTrip = async (plan: TripPlan, startAt?: LatLng): Promise<string | null> => {
     if (this.snap.planning) return 'Already starting a trip';
     const useGps = this.snap.sim.locationSource === 'gps';
     const here = this.snap.gpsFix;
     if (useGps && !here) return 'No GPS fix yet. Wait for GPS, or switch location source to Simulated.';
 
     // Simulated trips start from the real position if known, else 1.5 km from pickup.
-    const start = here ?? offset(plan.pickup, 1500, 225);
+    const start = (!useGps && startAt) || here || offset(plan.pickup, 1500, 225);
     this.set({ planning: true });
     this.log('info', 'Fetching road routes...');
     const [a, b] = await Promise.all([fetchRoute(start, plan.pickup), fetchRoute(plan.pickup, plan.dropoff)]);
@@ -527,6 +549,7 @@ export class TrackingEngine {
     }
     this.updateTelemetry();
     this.applyConnectivity();
+    this.persist(); // keep switches (location source, signal…) across restarts
   }
 
   setSimBattery(level: number) {

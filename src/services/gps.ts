@@ -11,24 +11,48 @@ export interface Fix {
   timestamp: number;
 }
 
-// Foreground GPS: asks for permission, then keeps `fix` updated.
+// Foreground GPS: asks for permission, then keeps `fix` updated. One instance
+// (sharedGps) feeds every logged-in driver, so N drivers don't mean N GPS watchers.
 export class GpsTracker {
   status: GpsStatus = 'starting';
   fix: Fix | null = null;
-  onChange?: () => void;
 
   private sub: Location.LocationSubscription | null = null;
-  private stopped = true;
+  private gen = 0; // bumped by start/stop; a start that is no longer current gives up
+  private listeners = new Set<() => void>();
+  private users = 0;
+
+  subscribe(fn: () => void) {
+    this.listeners.add(fn);
+    return () => {
+      this.listeners.delete(fn);
+    };
+  }
+
+  // Ref-counted: GPS runs while at least one driver needs it.
+  acquire() {
+    if (this.users++ === 0) this.start();
+  }
+
+  release() {
+    this.users = Math.max(0, this.users - 1);
+    if (this.users === 0) this.stop();
+  }
+
+  private notify() {
+    this.listeners.forEach((fn) => fn());
+  }
 
   async start() {
     this.stop();
-    this.stopped = false;
+    const gen = this.gen;
+    const stale = () => gen !== this.gen;
     this.setStatus('starting');
     try {
       const perm = await Location.requestForegroundPermissionsAsync();
-      if (this.stopped) return;
+      if (stale()) return;
       if (perm.status !== 'granted') return this.setStatus('denied');
-      if (!(await Location.hasServicesEnabledAsync())) return this.setStatus('disabled');
+      if (!(await Location.hasServicesEnabledAsync())) return stale() ? undefined : this.setStatus('disabled');
 
       this.setStatus(this.fix ? 'ok' : 'waiting');
       const last = await Location.getLastKnownPositionAsync().catch(() => null);
@@ -39,15 +63,15 @@ export class GpsTracker {
         (loc) => this.accept(loc),
         () => this.setStatus('error'),
       );
-      if (this.stopped) sub.remove();
+      if (stale()) sub.remove();
       else this.sub = sub;
     } catch {
-      if (!this.stopped) this.setStatus('error');
+      if (!stale()) this.setStatus('error');
     }
   }
 
   stop() {
-    this.stopped = true;
+    this.gen++;
     this.sub?.remove();
     this.sub = null;
   }
@@ -63,11 +87,13 @@ export class GpsTracker {
       timestamp: loc.timestamp,
     };
     this.status = 'ok';
-    this.onChange?.();
+    this.notify();
   }
 
   private setStatus(s: GpsStatus) {
     this.status = s;
-    this.onChange?.();
+    this.notify();
   }
 }
+
+export const sharedGps = new GpsTracker();
